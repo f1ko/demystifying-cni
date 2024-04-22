@@ -1,3 +1,10 @@
+# Introduction
+
+The Cilium project recently became a graduated CNCF project and is the only graduated project in the CNCF Cloud Native Networking category.
+While Cilium can do many things - Ingress, Service Mesh, Observability, Encryption - its popularity initially soared as a pure CNI: a high-performance feature-rich Container Network plugin.
+However, we may actually take for granted what CNI actually means.
+In this blog post, we will demistify what a CNI does and even build a CNI from scratch.
+By the end of this post, you will have built your own homemade alternative to Cilium.
 
 ## What Is a Container Network Interface (CNI)?
 
