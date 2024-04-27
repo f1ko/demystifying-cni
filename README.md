@@ -111,8 +111,8 @@ ip link set ${VETH_HOST} up
 ip -n ${NETNS} link set ${CNI_IFNAME} up
 
 # add routes inside the new network namespace so that it knows how to get to the host
-ip -n ${NETNS} route add 10.244.0.101 dev eth0
-ip -n ${NETNS} route add default via 10.244.0.101 dev eth0
+ip -n ${NETNS} route add ${IP_VETH_HOST} dev eth0
+ip -n ${NETNS} route add default via ${IP_VETH_HOST} dev eth0
 
 # add route on the host to let it know how to reach the new network namespace
 ip route add ${IP_VETH_NETNS}/32 dev ${VETH_HOST} scope host
