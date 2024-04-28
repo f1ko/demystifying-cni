@@ -9,7 +9,7 @@ By the end of this post, you will have built your own homemade alternative to Ci
 ## What Is a Container Network Interface (CNI)?
 
 The Container Network Interface (CNI) is a CNCF project that specifies the relationship between a Container Runtime Interface (CRI), such as containerd, responsible for container creation, and a CNI plugin tasked with configuring network interfaces within the container upon execution.
-Ultimately, it's the CNI plugin that performs the substantive tasks, while CNI primarily denotes the interaction framework.
+Ultimately, it's the CNI plugin that performs the substantive tasks of configuring the network, while CNI primarily denotes the interaction framework.
 However, it's common practice to simply refer to the CNI plugin as "CNI", a convention we'll adhere to in this post.
 
 ## Container Networking Explained
@@ -47,7 +47,7 @@ Once this setup is complete, the CRI calls upon a CNI plugin to generate and con
 > Please note that a that CNIs typically do not handle traffic forwarding or load balancing.
 > By default, kube-proxy serves as the default network proxy in Kubernetes which utilizes technologies like iptables or IPVS to direct incoming network traffic to the relevant Pods within the cluster.
 > However, Cilium offers a superior alternative by loading eBPF programs directly into the kernel, achieving the same tasks with significantly higher speed.
-> Further information on Cilium's kube-proxy replacement can be found [here](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/).
+> For more information on this topic see "[What is Kube-Proxy and why move from iptables to eBPF?](https://isovalent.com/blog/post/why-replace-iptables-with-ebpf/)".
 
 ## Writing a CNI from scratch
 
@@ -90,7 +90,8 @@ Before delving into the implementation, let's examine the steps in more detail:
 
 ![Eighth step](cni-step-8.png)
 
-With that we have to create two files.
+Now it is time to incorporate the above steps.
+As previously outlined we will have to create two files on the node.
 
 The first one will be `/etc/cni/net.d/10-demystifying.conf`:
 ```
@@ -169,5 +170,33 @@ echo ${RETURN}
 ```
 
 As the CNI plugin must be executable, we'll need to modify the file mode using `chmod +x /opt/cni/bin/demystifying`.
-Admittedly, this setup isn't production-ready and has several limitations.
-Nonetheless, it offers insight into the workings of a CNI.
+With that, we've constructed an operational CNI.
+The next time a Pod is created on the node, it will follow the outlined steps, and our CNI will be invoked:
+```
+$ kubectl get pods -o wide
+NAME            READY   STATUS    RESTARTS   AGE   IP            NODE                             NOMINATED NODE   READINESS GATES
+best-app-ever   1/1     Running   0          11s   10.244.0.20   demystifying-cni-control-plane   <none>           <none>
+```
+
+As evident, the Pod is running as expected.
+Note that the Pod's IP address is `10.244.0.20`, as set by our CNI.
+With everything configured correctly, the node can successfully reach the Pod and receive a response:
+```
+$ curl 10.244.0.20
+<html><body><h1>It works!</h1></body></html>
+```
+
+Keep in mind that this setup isn't suitable for production environments and comes with limitations as real-world scenarios require additional steps.
+For instance, assigning different IP addresses to the veth interface within the container network namespace and ensuring unique names for the veth interfaces on the host namespace are essential to support multiple Pods.
+Additionally, adding network configuration is only one aspect of the tasks a CNI plugin must support.
+These tasks are triggered by the CRI setting the `CNI_COMMAND` environment variable to `DEL` or `CHECK` respectively when invoking the CNI plugin.
+There are several other tasks, the specific requirements for full compatibility vary across versions and are outlined in the [CNI specification](https://github.com/containernetworking/cni/blob/main/SPEC.md).
+Nevertheless, the concepts outlined in this blog post hold true regardless of version and offer valuable insights into the workings of a CNI.
+
+## Summary
+
+At the heart of Kubernetes networking lies the Container Network Interface (CNI) specification which defines the exchange between the Container Runtime Interface (CRI) and the executable CNI plugin which resides on every node within the Kubernetes cluster.
+While the CRI establishes a container's network namespace, it is the CNI plugin's role to execute intricate network configurations.
+These configurations involve creating virtual ethernet interfaces and managing network settings, ensuring seamless connectivity both to and from the newly established container network namespace.
+
+Cilium is as an advanced networking solution adhering to the CNI specification and further elevating the capabilities of Kubernetes networking within complex environments.
