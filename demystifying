@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+# create veth
+VETH_HOST=veth_host
+VETH_NETNS=veth_netns
+ip link add ${VETH_HOST} type veth peer name ${VETH_NETNS}
+
+# put one of the veth interfaces into the new network namespace
+NETNS=$(basename ${CNI_NETNS})
+ip link set ${VETH_NETNS} netns ${NETNS}
+
+# assign IP to veth interface inside the new network namespace
+IP_VETH_NETNS=10.244.0.20
+CIDR_VETH_NETNS=${IP_VETH_NETNS}/32
+ip -n ${NETNS} addr add ${CIDR_VETH_NETNS} dev ${VETH_NETNS}
+
+# assign IP to veth interface on the host
+IP_VETH_HOST=10.244.0.101
+CIDR_VETH_HOST=${IP_VETH_HOST}/32
+ip addr add ${CIDR_VETH_HOST} dev ${VETH_HOST}
+
+# rename veth interface inside the new network namespace
+ip -n ${NETNS} link set ${VETH_NETNS} name ${CNI_IFNAME}
+
+# ensure all interfaces are up
+ip link set ${VETH_HOST} up
+ip -n ${NETNS} link set ${CNI_IFNAME} up
+
+# add routes inside the new network namespace so that it knows how to get to the host
+ip -n ${NETNS} route add ${IP_VETH_HOST} dev eth0
+ip -n ${NETNS} route add default via ${IP_VETH_HOST} dev eth0
+
+# add route on the host to let it know how to reach the new network namespace
+ip route add ${IP_VETH_NETNS}/32 dev ${VETH_HOST} scope host
+
+# return a JSON via stdout
+RETURN_TEMPLATE='
+{
+  "cniVersion": "1.0.0",
+  "interfaces": [
+    {
+      "name": "%s",
+      "mac": "%s"
+    },
+    {
+      "name": "%s",
+      "mac": "%s",
+      "sandbox": "%s"
+    }
+  ],
+  "ips": [
+    {
+      "address": "%s",
+      "interface": 1
+    }
+  ]
+}'
+
+MAC_HOST_VETH=$(ip link show ${VETH_HOST} | grep link | awk '{print$2}')
+MAC_NETNS_VETH=$(ip -netns $nsname link show ${CNI_IFNAME} | grep link | awk '{print$2}')
+
+RETURN=$(printf "${RETURN_TEMPLATE}" "${VETH_HOST}" "${MAC_HOST_VETH}" "${CNI_IFNAME}" "${mac_netns_veth}" "${CNI_NETNS}" "${CIDR_VETH_NETNS}")
+echo ${RETURN}

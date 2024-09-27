@@ -91,7 +91,10 @@ Before delving into the implementation, let's examine the steps in more detail:
 ![Eighth step](cni-step-8.png)
 
 Now it is time to incorporate the above steps.
-As previously outlined we will have to create two files on the node.
+The easiest way to follow along is by using the kind setup provided in this repository.
+Create a test cluster by executing `make cluster`.
+
+As previously outlined we will now have to create two files on the node.
 
 The first one will be `/etc/cni/net.d/10-demystifying.conf`:
 ```
@@ -171,7 +174,11 @@ echo ${RETURN}
 
 As the CNI plugin must be executable, we'll need to modify the file mode using `chmod +x /opt/cni/bin/demystifying`.
 With that, we've constructed an operational CNI.
-The next time a Pod is created on the node, it will follow the outlined steps, and our CNI will be invoked:
+
+These steps can be achieved by executing `make cni`.
+
+The next time a Pod is created on the node, it will follow the outlined steps, and our CNI will be invoked.
+Once a Pod is started we should see the following:
 ```
 $ kubectl get pods -o wide
 NAME            READY   STATUS    RESTARTS   AGE   IP            NODE                             NOMINATED NODE   READINESS GATES
@@ -183,6 +190,24 @@ Note that the Pod's IP address is `10.244.0.20`, as set by our CNI.
 With everything configured correctly, the node can successfully reach the Pod and receive a response:
 ```
 $ curl 10.244.0.20
+<html><body><h1>It works!</h1></body></html>
+```
+
+To perform such a test we can execute `make test`:
+```
+$ make test
+kubectl apply -f test.yaml
+pod/best-app-ever created
+
+------
+
+kubectl get pods -o wide
+NAME            READY   STATUS    RESTARTS   AGE   IP            NODE                             NOMINATED NODE   READINESS GATES
+best-app-ever   1/1     Running   0          6s    10.244.0.20   demystifying-cni-control-plane   <none>           <none>
+
+------
+
+docker exec demystifying-cni-control-plane curl -s 10.244.0.20
 <html><body><h1>It works!</h1></body></html>
 ```
 
