@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: demystifying-cni
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: demystifying-cni
+  template:
+    metadata:
+      labels:
+        app: demystifying-cni
+    spec:
+      # running in hostNetwork avoids dependency on CNI (solve chicken-egg problem) 
+      hostNetwork: true
+      tolerations:
+      # ensure to schedule on nodes that are not ready (nodes without a CNI are not ready)
+      - key: node.kubernetes.io/not-ready
+        operator: Exists
+        effect: NoSchedule
+      # ensure to schedule on control-plane nodes
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: demystifying-cni
+        image: demystifying-cni:0.0.1
+        volumeMounts:
+        - name: netd
+          mountPath: /etc/cni/net.d
+        - name: cnibin
+          mountPath: /opt/cni/bin
+      # use hostPath to get access to the node filesystem
+      volumes:
+      - name: netd
+        hostPath:
+          path: /etc/cni/net.d
+      - name: cnibin
+        hostPath:
+          path: /opt/cni/bin

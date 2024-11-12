@@ -3,14 +3,14 @@
 The Cilium project recently became a graduated CNCF project and is the only graduated project in the CNCF Cloud Native Networking category.
 While Cilium can do many things - Ingress, Service Mesh, Observability, Encryption - its popularity initially soared as a pure CNI: a high-performance feature-rich Container Network plugin.
 However, we may actually take for granted what CNI actually means.
-In this blog post, we will demistify what a CNI does and even build a CNI from scratch.
-By the end of this post, you will have built your own homemade alternative to Cilium.
+In this repository, we will demistify what a CNI does and even build a CNI from scratch.
+By the end of this repository, you will have built your own homemade alternative to Cilium.
 
 ## What Is a Container Network Interface (CNI)?
 
 The Container Network Interface (CNI) is a CNCF project that specifies the relationship between a Container Runtime Interface (CRI), such as containerd, responsible for container creation, and a CNI plugin tasked with configuring network interfaces within the container upon execution.
 Ultimately, it's the CNI plugin that performs the substantive tasks of configuring the network, while CNI primarily denotes the interaction framework.
-However, it's common practice to simply refer to the CNI plugin as "CNI", a convention we'll adhere to in this post.
+However, it's common practice to simply refer to the CNI plugin as "CNI", a convention we'll adhere to in this repository.
 
 ## Container Networking Explained
 
@@ -21,7 +21,7 @@ These namespaces allocate system resources, such as interfaces, to specific name
 
 > Note that namespaces are referring to Linux namespaces, a Linux kernel feature and have nothing to do with Kubernetes namesapces.
 
-While containers consist of various namespaces, we will concentrate on the network namespace for the purposes of this blog.
+While containers consist of various namespaces, we will concentrate on the network namespace for the purposes of this repository.
 Typically each container has its own network namespace.
 This isolation ensures that interfaces outside of the container's namespace are not visible within the container's namespace and processes can bind to the same port without conflict.
 
@@ -211,12 +211,85 @@ docker exec demystifying-cni-control-plane curl -s 10.244.0.20
 <html><body><h1>It works!</h1></body></html>
 ```
 
+So far, this demonstrates the simplest deployment of a CNI.
+However, modern CNIs are usually deployed as Pods, enabling centralized management and dynamic scaling across cluster nodes.
+To illustrate how this can be done, let’s first remove our existing CNI by running `make clean`.
+
+Until now, the CNI setup requires manual steps on every node.
+This means that each time a new node is added, the necessary CNI files must be copied onto it manually.
+A more scalable approach is to use a Kubernetes DaemonSet, which ensures that each node automatically receives one Pod running the CNI.
+This Pod will then copy the required files into each node's appropriate directories, making sure the CNI is installed and ready to use.
+
+![CNI running as DaemonSet](cni-daemonset.png)
+
+To deploy the CNI as a DaemonSet, we first need to create a Docker image containing the necessary files:
+```
+FROM alpine:3
+
+COPY 10-demystifying.conf /cni/10-demystifying.conf
+COPY demystifying /cni/demystifying
+COPY entrypoint.sh /cni/entrypoint.sh
+RUN chmod +x /cni/demystifying
+RUN chmod +x /cni/entrypoint.sh
+
+ENTRYPOINT [/cni/entrypoint.sh]
+```
+
+This Dockerfile creates an image with `10-demystifying.conf` and `demystifying` — the same files we used in our previous setup - alongside an `entrypoint.sh` script that will act as the container's entry point.
+
+The entrypoint.sh script executes the following commands when the container starts:
+```
+#!/usr/bin/env bash
+
+cp /cni/10-demystifying.conf /etc/cni/net.d/
+cp /cni/demystifying /opt/cni/bin/
+sleep infinity
+```
+
+These commands replicate the manual installation steps within the container, copying configuration and executable files to the appropriate directories on each node.
+
+Next, build the Docker image locally:
+```
+docker build -t demystifying-cni:0.0.1 .
+```
+
+In the real world the image would reside in a registry and the node would pull it from there.
+Since we built it locally we will have to load the image onto the kind cluster:
+```
+kind load docker-image demystifying-cni:0.0.1 --name demystifying-cni
+```
+
+With the image available on the cluster, we can deploy the DaemonSet:
+```
+kubectl apply -f cni-daemonset.yaml
+```
+
+To automate these steps, you can simply run `make daemonset`.
+
+Finally, test that everything works as expected using the DaemonSet architecture:
+```
+$ make test
+kubectl apply -f test.yaml
+pod/best-app-ever created
+
+------
+
+kubectl get pods -o wide
+NAME            READY   STATUS    RESTARTS   AGE   IP            NODE                             NOMINATED NODE   READINESS GATES
+best-app-ever   1/1     Running   0          5s    10.244.0.20   demystifying-cni-control-plane   <none>           <none>
+
+------
+
+docker exec demystifying-cni-control-plane curl -s 10.244.0.20
+<html><body><h1>It works!</h1></body></html>
+```
+
 Keep in mind that this setup isn't suitable for production environments and comes with limitations as real-world scenarios require additional steps.
 For instance, assigning different IP addresses to the veth interface within the container network namespace and ensuring unique names for the veth interfaces on the host namespace are essential to support multiple Pods.
 Additionally, adding network configuration is only one aspect of the tasks a CNI plugin must support.
 These tasks are triggered by the CRI setting the `CNI_COMMAND` environment variable to `DEL` or `CHECK` respectively when invoking the CNI plugin.
 There are several other tasks, the specific requirements for full compatibility vary across versions and are outlined in the [CNI specification](https://github.com/containernetworking/cni/blob/main/SPEC.md).
-Nevertheless, the concepts outlined in this blog post hold true regardless of version and offer valuable insights into the workings of a CNI.
+Nevertheless, the concepts outlined in this repository hold true regardless of version and offer valuable insights into the workings of a CNI.
 
 ## Summary
 
