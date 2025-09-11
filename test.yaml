@@ -1,8 +1,23 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: best-app-ever
+spec:
+  clusterIP: 10.96.0.100
+  selector:
+    app: best-app-ever
+  ports:
+  - port: 80
+---
 apiVersion: v1
 kind: Pod
 metadata:
   name: best-app-ever
+  labels:
+    app: best-app-ever
 spec:
   containers:
   - name: httpd
     image: httpd
+    imagePullPolicy: Never # TODO: remove, just for offline access
