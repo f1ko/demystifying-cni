@@ -31,8 +31,23 @@ test:
 .PHONY: bpf-prepare
 bpf-prepare:
 	docker exec demystifying-cni-control-plane apt update -y > /dev/null
-	docker exec demystifying-cni-control-plane apt install -y clang llvm libbpf-dev libelf-dev gcc make > /dev/null
+	docker exec demystifying-cni-control-plane apt install -y clang llvm libbpf-dev libelf-dev gcc make bpftool > /dev/null
 	docker exec demystifying-cni-control-plane ln -s /usr/include/aarch64-linux-gnu/asm /usr/include/asm || true
+
+.PHONY: bpf-compile-kpr
+bpf-compile-kpr: bpf-prepare
+	docker cp bpf_kpr.c demystifying-cni-control-plane:/root/bpf_kpr.c
+	docker exec demystifying-cni-control-plane clang -O2 -g -target bpf -Wall -c /root/bpf_kpr.c -o /root/bpf_kpr.o
+
+.PHONY: bpf-unload-kpr bpf-clean-kpr
+bpf-unload-kpr bpf-clean-kpr:
+	- docker exec demystifying-cni-control-plane bpftool cgroup detach /sys/fs/cgroup connect4 pinned /sys/fs/bpf/sock4_connect
+	- docker exec demystifying-cni-control-plane rm /sys/fs/bpf/sock4_connect
+
+.PHONY: bpf-load-kpr
+bpf-load-kpr: bpf-unload-kpr bpf-compile-kpr
+	docker exec demystifying-cni-control-plane bpftool prog load /root/bpf_kpr.o /sys/fs/bpf/sock4_connect
+	docker exec demystifying-cni-control-plane bpftool cgroup attach /sys/fs/cgroup connect4 pinned /sys/fs/bpf/sock4_connect
 
 .PHONY: bpf-compile
 bpf-compile: bpf-prepare
