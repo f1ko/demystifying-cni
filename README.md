@@ -3,7 +3,7 @@
 The Cilium project recently became a graduated CNCF project and is the only graduated project in the CNCF Cloud Native Networking category.
 While Cilium can do many things - Ingress, Service Mesh, Observability, Encryption - its popularity initially soared as a pure CNI: a high-performance feature-rich Container Network plugin.
 However, we may actually take for granted what CNI actually means.
-In this repository, we will demistify what a CNI does and even build a CNI from scratch.
+In this repository, we will demystify what a CNI does and even build a CNI from scratch.
 By the end of this repository, you will have built your own homemade alternative to Cilium.
 
 ## What Is a Container Network Interface (CNI)?
@@ -19,7 +19,7 @@ This design choice renders containers more lightweight but less isolated compare
 To provide some level of isolation, containers utilize a kernel feature known as namespaces.
 These namespaces allocate system resources, such as interfaces, to specific namespaces, preventing those resources from being visible in other namespaces of the same type.
 
-> Note that namespaces are referring to Linux namespaces, a Linux kernel feature and have nothing to do with Kubernetes namesapces.
+> Note that namespaces are referring to Linux namespaces, a Linux kernel feature and have nothing to do with Kubernetes namespaces.
 
 While containers consist of various namespaces, we will concentrate on the network namespace for the purposes of this repository.
 Typically each container has its own network namespace.
@@ -44,7 +44,7 @@ Once this setup is complete, the CRI calls upon a CNI plugin to generate and con
 
 ![High level dependencies that invoke a CNI](cni-high-level.png)
 
-> Please note that a that CNIs typically do not handle traffic forwarding or load balancing.
+> Please note that CNIs typically do not handle traffic forwarding or load balancing.
 > By default, kube-proxy serves as the default network proxy in Kubernetes which utilizes technologies like iptables or IPVS to direct incoming network traffic to the relevant Pods within the cluster.
 > However, Cilium offers a superior alternative by loading eBPF programs directly into the kernel, achieving the same tasks with significantly higher speed.
 > For more information on this topic see "[What is Kube-Proxy and why move from iptables to eBPF?](https://isovalent.com/blog/post/why-replace-iptables-with-ebpf/)".
@@ -78,7 +78,7 @@ Before delving into the implementation, let's examine the steps in more detail:
 
 ![Fifth step](cni-step-5.png)
 
-6. The veth interface on the host will receive another IP address, serving as the default gateway within the container's network namespace.We'll statically assign `10.244.0.101` as the IP address. Irrespective of the number of Pods created on the node this IP can stay the same as its sole purpose is to serve as a destination for a route within the container's network namespace.
+6. The veth interface on the host will receive another IP address, serving as the default gateway within the container's network namespace. We'll statically assign `10.244.0.101` as the IP address. Irrespective of the number of Pods created on the node this IP can stay the same as its sole purpose is to serve as a destination for a route within the container's network namespace.
 
 ![Sixth step](cni-step-6.png)
 
@@ -291,10 +291,124 @@ These tasks are triggered by the CRI setting the `CNI_COMMAND` environment varia
 There are several other tasks, the specific requirements for full compatibility vary across versions and are outlined in the [CNI specification](https://github.com/containernetworking/cni/blob/main/SPEC.md).
 Nevertheless, the concepts outlined in this repository hold true regardless of version and offer valuable insights into the workings of a CNI.
 
+## What about eBPF?
+
+At this point we have essentially built a CNI from scratch.
+eBPF is not a replacement for what we have done, it is simply another technology that can be used to implement certain networking features, alongside or in place of others like iptables, IPVS, or routing daemons.
+
+There is a limitation in our current setup worth addressing: we can reach a Pod directly by its IP address, but we cannot reach it via a Kubernetes Service.
+When a Service is created, Kubernetes assigns it a virtual IP called a ClusterIP.
+This IP does not belong to any network interface or real host, it only exists as a concept in the control plane.
+Something must intercept traffic destined for the ClusterIP and redirect it to the actual Pod IP behind the Service.
+By default, kube-proxy handles this using iptables rules installed on every node.
+We will implement the same thing using eBPF and mimic Cilium's kube-proxy replacement (KPR).
+
+eBPF allows you to load small programs into the Linux kernel without modifying kernel source code or writing a kernel module.
+These programs are primarily written in C and compiled to a special bytecode format that the kernel understands.
+Before executing them, the kernel runs a built-in verifier that checks the program is safe to ensure it has no infinite loops, accesses only valid memory, and cannot crash the kernel.
+Once verified, the program is loaded and attached to a hook point in the kernel, where it runs automatically whenever the associated event occurs.
+
+The hook you attach to determines where in the network stack you can intercept and modify traffic.
+There are several options, each with different trade-offs:
+
+- **XDP** (eXpress Data Path): runs at the very earliest point where the network card driver receives a packet — before the kernel has even allocated a socket buffer for it. Extremely fast, but you only see raw packet bytes.
+- **tc** (Traffic Control): runs in the kernel's traffic control layer, after the packet has been parsed. Useful for filtering and modifying traffic on a specific network interface.
+- **cgroup/connect**: runs at the moment a process calls the `connect()` system call, before the packet is created at all. You can inspect and rewrite the destination address right at the socket level.
+
+![eBPF hooks](ebpf-hooks.png)
+
+We will use `cgroup/connect4`, the [same hook Cilium uses by default for its kube-proxy replacement](https://github.com/cilium/cilium/blob/1.18.10/bpf/bpf_sock.c#L414).
+Hooking at the socket level means we intercept the Service address before any routing or packet processing happens, and the rest of the kernel only ever sees the real Pod IP.
+
+![eBPF Socket LB](ebpf-socket.png)
+
+Our test setup created a Service with the ClusterIP `10.96.0.100` which is supposed to forward traffic to the Pod at `10.244.0.20`.
+However, since we disabled kube-proxy, this does not work as of now.
+The following eBPF program intercepts any `connect()` syscall going to that ClusterIP and rewrites the destination to the Pod IP:
+
+```c
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+SEC("cgroup/connect4")
+int sock4_connect(struct bpf_sock_addr *ctx)
+{
+  const __be32 cluster_ip = 0x0A600064; // 10.96.0.100
+  const __be32 pod_ip = 0x0AF40014;     // 10.244.0.20
+
+  if (ctx->user_ip4 == __bpf_htonl(cluster_ip)) {
+      ctx->user_ip4 = __bpf_htonl(pod_ip);
+  }
+
+  return 1;
+}
+
+char LICENSE[] SEC("license") = "GPL";
+```
+
+`SEC("cgroup/connect4")` tells the BPF loader which kernel hook to attach the program to.
+The function receives a `bpf_sock_addr` context containing the destination IP address the process is trying to connect to, stored in the field `user_ip4`.
+
+The IP addresses are written as hexadecimal literals because network protocols store addresses in big-endian format (most significant byte first).
+For example, `10.96.0.100` translates byte-by-byte to `0x0A`, `0x60`, `0x00`, `0x64`, giving `0x0A600064`.
+Similarly, `10.244.0.20` becomes `0x0A`, `0xF4`, `0x00`, `0x14`, giving `0x0AF40014`.
+The `__bpf_htonl` function converts these values to big-endian at runtime, ensuring the comparison is correct regardless of the host architecture.
+
+The program checks whether the destination matches our ClusterIP and, if so, overwrites it with the Pod IP.
+Returning `1` tells the kernel to allow the connection to proceed.
+
+Note that this program is intentionally simplified: it is hard-coded for a single specific Service IP and a single Pod IP.
+A real implementation, like Cilium, dynamically looks up the correct backend from a BPF map, handles multiple backends, health checking, and session affinity.
+The goal here is to illustrate the concept, not to build a production-ready load balancer.
+
+Before an eBPF program has any effect, it must go through two steps:
+
+1. **Load**: the compiled bytecode is handed to the kernel using a tool like `bpftool`. The kernel's verifier inspects it, and if it passes, the program is stored in kernel memory and pinned to a file path under `/sys/fs/bpf/` so it is not lost when the process that loaded it exits.
+2. **Attach**: the loaded program is connected to a specific hook point. In our case we attach to `connect4` for the root cgroup, meaning the program will run for every `connect()` call made by any process on the node.
+
+With the kind cluster and our CNI running, you can compile, load, and attach the program with a single command:
+```
+make bpf-load-kpr
+```
+
+This will install the required tooling on the node, compile `bpf_kpr.c` using `clang`, load the resulting bytecode into the kernel, and attach it to the cgroup hook.
+
+Once loaded, try reaching the Service ClusterIP directly from within the node:
+```
+$ make test-service
+kubectl apply -f test.yaml
+service/best-app-ever unchanged
+pod/best-app-ever unchanged
+
+------
+
+kubectl get svc
+NAME            TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)   AGE
+best-app-ever   ClusterIP   10.96.0.100   <none>        80/TCP    3m50s
+kubernetes      ClusterIP   10.96.0.1     <none>        443/TCP   25m
+
+------
+
+docker exec demystifying-cni-control-plane curl -m 5 -s 10.96.0.100
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<title>It works! Apache httpd</title>
+</head>
+<body>
+<p>It works!</p>
+</body>
+</html>
+```
+
+Without the eBPF program, this request would fail because nothing translates the ClusterIP to the Pod IP.
+With the program loaded, the kernel rewrites the destination transparently and the request reaches the Pod.
+
 ## Summary
 
 At the heart of Kubernetes networking lies the Container Network Interface (CNI) specification which defines the exchange between the Container Runtime Interface (CRI) and the executable CNI plugin which resides on every node within the Kubernetes cluster.
 While the CRI establishes a container's network namespace, it is the CNI plugin's role to execute intricate network configurations.
 These configurations involve creating virtual ethernet interfaces and managing network settings, ensuring seamless connectivity both to and from the newly established container network namespace.
 
-Cilium is as an advanced networking solution adhering to the CNI specification and further elevating the capabilities of Kubernetes networking within complex environments.
+Cilium is an advanced networking solution adhering to the CNI specification and further elevating the capabilities of Kubernetes networking within complex environments.

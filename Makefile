@@ -28,6 +28,15 @@ test:
 	@echo "\n------\n"
 	docker exec demystifying-cni-control-plane curl -m 5 -s 10.244.0.20
 
+.PHONY: test-service
+test-service:
+	kubectl apply -f test.yaml
+	@sleep 5
+	@echo "\n------\n"
+	kubectl get svc
+	@echo "\n------\n"
+	docker exec demystifying-cni-control-plane curl -m 5 -s 10.96.0.100
+
 .PHONY: bpf-prepare
 bpf-prepare:
 	docker exec demystifying-cni-control-plane apt update -y > /dev/null
